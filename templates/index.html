@@ -90,23 +90,23 @@
     }
 
     function renderPendingCard(name) {
-      const article = document.createElement("article");
-      article.className = "review review-column pending";
-      article.id = reviewerId(name);
-      article.innerHTML = `
-        <h2>${escapeText(name)}</h2>
+      const details = document.createElement("details");
+      details.className = "review artifact pending";
+      details.id = reviewerId(name);
+      details.innerHTML = `
+        <summary>${escapeText(name)}</summary>
         <pre class="progress-log">Waiting...</pre>
       `;
-      grid.appendChild(article);
+      grid.appendChild(details);
     }
 
     function renderProgress(event) {
-      const card = document.querySelector(`#${CSS.escape(reviewerId(event.reviewer))}`);
-      if (!card) {
+      const artifact = document.querySelector(`#${CSS.escape(reviewerId(event.reviewer))}`);
+      if (!artifact) {
         return;
       }
 
-      const log = card.querySelector(".progress-log");
+      const log = artifact.querySelector(".progress-log");
       if (!log) {
         return;
       }
@@ -116,11 +116,10 @@
     }
 
     function renderResult(result) {
-      let card = document.querySelector(`#${CSS.escape(reviewerId(result.name.replace(" failed", "")))}`);
-      if (!card) {
-        card = document.createElement("article");
-        card.className = "review review-column";
-        grid.appendChild(card);
+      let artifact = document.querySelector(`#${CSS.escape(reviewerId(result.name.replace(" failed", "")))}`);
+      if (!artifact) {
+        artifact = document.createElement("details");
+        grid.appendChild(artifact);
       }
 
       const sources = (result.sources || []).map((source) => (
@@ -130,9 +129,10 @@
         ? `<details class="reasoning"><summary>Reasoning summary</summary><pre>${escapeText(result.reasoning_summary)}</pre></details>`
         : "";
 
-      card.className = "review review-column";
-      card.innerHTML = `
-        <h2>${escapeText(result.name)}</h2>
+      artifact.className = "review artifact";
+      artifact.open = false;
+      artifact.innerHTML = `
+        <summary>${escapeText(result.name)}</summary>
         ${reasoning}
         <pre>${escapeText(result.text || "")}</pre>
         ${sources ? `<h3>Sources</h3><ul class="sources">${sources}</ul>` : ""}

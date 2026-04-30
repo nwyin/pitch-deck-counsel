@@ -34,8 +34,8 @@
   </details>
 
   {% for result in results %}
-    <section class="review">
-      <h2>{{ result.name }}</h2>
+    <details class="review artifact">
+      <summary>{{ result.name }}</summary>
       {% if result.reasoning_summary %}
         <details class="reasoning">
           <summary>Reasoning summary</summary>
@@ -51,6 +51,6 @@
           {% endfor %}
         </ul>
       {% endif %}
-    </section>
+    </details>
   {% endfor %}
 {% endblock %}

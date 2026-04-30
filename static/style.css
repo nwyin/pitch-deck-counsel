@@ -6,9 +6,9 @@ body {
 }
 
 main {
-  max-width: 980px;
+  max-width: 1280px;
   margin: 32px auto;
-  padding: 0 20px;
+  padding: 0 28px;
 }
 
 h1 {
@@ -156,24 +156,25 @@ code {
 }
 
 .results-grid {
-  display: flex;
-  gap: 16px;
-  overflow-x: auto;
-  padding-bottom: 16px;
+  display: block;
 }
 
-.review-column {
-  flex: 0 0 520px;
-  align-self: flex-start;
-  max-height: 76vh;
-  overflow: auto;
+.artifact {
   padding: 14px;
   border: 1px solid #d7d7d2;
   border-radius: 4px;
   background: #ffffff;
 }
 
-.review-column.pending pre {
+.artifact + .artifact {
+  margin-top: 12px;
+}
+
+.artifact > summary {
+  font-size: 17px;
+}
+
+.artifact.pending pre {
   color: #66717c;
 }
 
@@ -188,7 +189,8 @@ h3 {
 }
 
 pre {
-  white-space: pre;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   overflow: auto;
   font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }

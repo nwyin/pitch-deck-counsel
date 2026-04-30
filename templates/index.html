@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <h1>Deck Review Council</h1>
+
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% endif %}
+
+  <form method="post" action="/review" id="review-form">
+    <div class="controls">
+      <label>
+        Model
+        <select name="model">
+          {% for option in model_options %}
+            <option value="{{ option.value }}" {% if settings.model == option.value %}selected{% endif %}>
+              {{ option.label }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        Reasoning effort
+        <select name="reasoning_effort">
+          {% for option in effort_options %}
+            <option value="{{ option.value }}" {% if settings.reasoning_effort == option.value %}selected{% endif %}>
+              {{ option.label }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
+        Search context
+        <select name="search_context_size">
+          {% for option in search_context_options %}
+            <option value="{{ option.value }}" {% if settings.search_context_size == option.value %}selected{% endif %}>
+              {{ option.label }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="checkbox">
+        <input
+          type="checkbox"
+          name="enable_web_search"
+          {% if settings.enable_web_search %}checked{% endif %}
+        >
+        Web search
+      </label>
+    </div>
+
+    <textarea
+      name="deck_outline"
+      rows="24"
+      placeholder="Paste pitch deck outline here..."
+    >{{ deck_outline or "" }}</textarea>
+
+    <button type="submit">Run Review</button>
+  </form>
+
+  <section id="stream-area" class="stream-area" hidden>
+    <div class="stream-header">
+      <h2>Streaming Results</h2>
+      <p id="stream-status">Starting...</p>
+    </div>
+    <div id="results-grid" class="results-grid"></div>
+  </section>
+
+  <script>
+    const form = document.querySelector("#review-form");
+    const streamArea = document.querySelector("#stream-area");
+    const statusEl = document.querySelector("#stream-status");
+    const grid = document.querySelector("#results-grid");
+
+    function escapeText(value) {
+      return value.replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;",
+      }[char]));
+    }
+
+    function reviewerId(name) {
+      return "reviewer-" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    }
+
+    function renderPendingCard(name) {
+      const article = document.createElement("article");
+      article.className = "review review-column pending";
+      article.id = reviewerId(name);
+      article.innerHTML = `
+        <h2>${escapeText(name)}</h2>
+        <pre>Waiting...</pre>
+      `;
+      grid.appendChild(article);
+    }
+
+    function renderResult(result) {
+      let card = document.querySelector(`#${CSS.escape(reviewerId(result.name.replace(" failed", "")))}`);
+      if (!card) {
+        card = document.createElement("article");
+        card.className = "review review-column";
+        grid.appendChild(card);
+      }
+
+      const sources = (result.sources || []).map((source) => (
+        `<li><a href="${escapeText(source.url)}">${escapeText(source.title)}</a></li>`
+      )).join("");
+      const reasoning = result.reasoning_summary
+        ? `<details class="reasoning"><summary>Reasoning summary</summary><pre>${escapeText(result.reasoning_summary)}</pre></details>`
+        : "";
+
+      card.className = "review review-column";
+      card.innerHTML = `
+        <h2>${escapeText(result.name)}</h2>
+        ${reasoning}
+        <pre>${escapeText(result.text || "")}</pre>
+        ${sources ? `<h3>Sources</h3><ul class="sources">${sources}</ul>` : ""}
+      `;
+    }
+
+    async function streamReview(event) {
+      event.preventDefault();
+
+      streamArea.hidden = false;
+      grid.innerHTML = "";
+      statusEl.textContent = "Starting...";
+
+      const response = await fetch("/review-stream", {
+        method: "POST",
+        body: new FormData(form),
+      });
+
+      if (!response.ok || !response.body) {
+        statusEl.textContent = `Request failed: ${response.status}`;
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) {
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (!line.trim()) {
+            continue;
+          }
+
+          const event = JSON.parse(line);
+          if (event.type === "start") {
+            statusEl.innerHTML = `Reviewers running... Archived to <code>${escapeText(event.archive_dir)}</code>`;
+            event.reviewers.forEach(renderPendingCard);
+          } else if (event.type === "result") {
+            renderResult(event.result);
+          } else if (event.type === "error") {
+            statusEl.textContent = event.message;
+          } else if (event.type === "done") {
+            statusEl.textContent = "Done.";
+          }
+        }
+      }
+    }
+
+    form.addEventListener("submit", streamReview);
+  </script>
+{% endblock %}

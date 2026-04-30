@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <a href="/">New review</a>
+
+  <h1>Review Results</h1>
+
+  {% if archive_dir %}
+    <p class="archive-path">Archived to <code>{{ archive_dir }}</code></p>
+  {% endif %}
+
+  <dl class="run-settings">
+    <div>
+      <dt>Model</dt>
+      <dd>{{ settings.model }}</dd>
+    </div>
+    <div>
+      <dt>Reasoning effort</dt>
+      <dd>{{ settings.reasoning_effort }}</dd>
+    </div>
+    <div>
+      <dt>Web search</dt>
+      <dd>{{ "on" if settings.enable_web_search else "off" }}</dd>
+    </div>
+    <div>
+      <dt>Search context</dt>
+      <dd>{{ settings.search_context_size }}</dd>
+    </div>
+  </dl>
+
+  <details>
+    <summary>Submitted outline</summary>
+    <pre>{{ deck_outline }}</pre>
+  </details>
+
+  {% for result in results %}
+    <section class="review">
+      <h2>{{ result.name }}</h2>
+      {% if result.reasoning_summary %}
+        <details class="reasoning">
+          <summary>Reasoning summary</summary>
+          <pre>{{ result.reasoning_summary }}</pre>
+        </details>
+      {% endif %}
+      <pre>{{ result.text }}</pre>
+      {% if result.sources %}
+        <h3>Sources</h3>
+        <ul class="sources">
+          {% for source in result.sources %}
+            <li><a href="{{ source.url }}">{{ source.title }}</a></li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+  {% endfor %}
+{% endblock %}

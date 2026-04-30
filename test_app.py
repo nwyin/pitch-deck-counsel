@@ -7,6 +7,23 @@ import app as app_module
 
 
 class PayloadTests(unittest.TestCase):
+    def test_default_background_reasoning_and_search_payload(self):
+        payload = app_module.build_response_payload(
+            name="Reviewer",
+            prompt="Prompt",
+            deck_outline="1. intro",
+            model="gpt-5.5",
+            reasoning_effort="low",
+            enable_web_search=True,
+            search_context_size="low",
+        )
+
+        self.assertEqual(payload["max_output_tokens"], app_module.REVIEW_MAX_OUTPUT_TOKENS)
+        self.assertEqual(payload["reasoning"], {"effort": "low", "summary": "detailed"})
+        self.assertEqual(payload["tools"], [{"type": "web_search", "search_context_size": "low"}])
+        self.assertTrue(payload["background"])
+        self.assertTrue(payload["store"])
+
     def test_no_reasoning_payload_omits_reasoning_and_adds_web_search(self):
         payload = app_module.build_response_payload(
             name="Reviewer",
@@ -53,6 +70,88 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(payload["reasoning"], {"effort": "high", "summary": "detailed"})
         self.assertNotIn("tools", payload)
         self.assertNotIn("independently research", payload["input"])
+
+
+class BackgroundResponseTests(unittest.TestCase):
+    def test_background_response_polls_until_completed(self):
+        original_client = app_module.OPENAI_CLIENT
+        original_poll_seconds = app_module.OPENAI_BACKGROUND_POLL_SECONDS
+
+        class FakeResponses:
+            def __init__(self):
+                self.retrieve_calls = 0
+
+            def create(self, **payload):
+                self.payload = payload
+                return SimpleNamespace(id="resp_1", status="queued", output_text="")
+
+            def retrieve(self, response_id, **kwargs):
+                self.retrieve_calls += 1
+                if self.retrieve_calls == 1:
+                    return SimpleNamespace(id=response_id, status="in_progress", output_text="")
+                return SimpleNamespace(id=response_id, status="completed", output_text="Done")
+
+        fake_responses = FakeResponses()
+        app_module.OPENAI_CLIENT = SimpleNamespace(responses=fake_responses)
+        app_module.OPENAI_BACKGROUND_POLL_SECONDS = 0
+        events = []
+
+        try:
+            response = app_module.create_response_with_retries(
+                {
+                    "model": "gpt-5.4-mini",
+                    "input": "Prompt",
+                    "background": True,
+                    "store": True,
+                },
+                reviewer_name="Reviewer A",
+                run_id="run-1",
+                progress_callback=events.append,
+            )
+        finally:
+            app_module.OPENAI_CLIENT = original_client
+            app_module.OPENAI_BACKGROUND_POLL_SECONDS = original_poll_seconds
+
+        self.assertEqual(response.status, "completed")
+        self.assertEqual(fake_responses.retrieve_calls, 2)
+        self.assertIn("submitted_openai", [event["status"] for event in events])
+        self.assertIn("polling", [event["status"] for event in events])
+        self.assertIn("completed_openai", [event["status"] for event in events])
+
+    def test_background_response_raises_on_terminal_status(self):
+        original_client = app_module.OPENAI_CLIENT
+        original_poll_seconds = app_module.OPENAI_BACKGROUND_POLL_SECONDS
+
+        class FakeResponses:
+            def create(self, **payload):
+                return SimpleNamespace(id="resp_1", status="queued", output_text="")
+
+            def retrieve(self, response_id, **kwargs):
+                return SimpleNamespace(
+                    id=response_id,
+                    status="incomplete",
+                    output_text="",
+                    incomplete_details=SimpleNamespace(model_dump=lambda: {"reason": "max_output_tokens"}),
+                )
+
+        app_module.OPENAI_CLIENT = SimpleNamespace(responses=FakeResponses())
+        app_module.OPENAI_BACKGROUND_POLL_SECONDS = 0
+
+        try:
+            with self.assertRaises(app_module.OpenAIResponseTerminalError):
+                app_module.create_response_with_retries(
+                    {
+                        "model": "gpt-5.4-mini",
+                        "input": "Prompt",
+                        "background": True,
+                        "store": True,
+                    },
+                    reviewer_name="Reviewer A",
+                    run_id="run-1",
+                )
+        finally:
+            app_module.OPENAI_CLIENT = original_client
+            app_module.OPENAI_BACKGROUND_POLL_SECONDS = original_poll_seconds
 
 
 class SourceExtractionTests(unittest.TestCase):

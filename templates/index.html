@@ -146,12 +146,16 @@
       const reasoning = result.reasoning_summary
         ? `<details class="reasoning"><summary>Reasoning summary</summary><pre>${escapeText(result.reasoning_summary)}</pre></details>`
         : "";
+      const metadata = result.response_metadata
+        ? `<details class="metadata"><summary>Response metadata</summary><pre>${escapeText(typeof result.response_metadata === "string" ? result.response_metadata : JSON.stringify(result.response_metadata, null, 2))}</pre></details>`
+        : "";
 
       artifact.className = "review artifact";
       artifact.open = false;
       artifact.innerHTML = `
         <summary>${escapeText(result.name)}</summary>
         ${reasoning}
+        ${metadata}
         <pre>${escapeText(result.text || "")}</pre>
         ${sources ? `<h3>Sources</h3><ul class="sources">${sources}</ul>` : ""}
       `;

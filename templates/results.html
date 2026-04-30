@@ -42,6 +42,12 @@
           <pre>{{ result.reasoning_summary }}</pre>
         </details>
       {% endif %}
+      {% if result.response_metadata %}
+        <details class="metadata">
+          <summary>Response metadata</summary>
+          <pre>{{ result.response_metadata }}</pre>
+        </details>
+      {% endif %}
       <pre>{{ result.text }}</pre>
       {% if result.sources %}
         <h3>Sources</h3>

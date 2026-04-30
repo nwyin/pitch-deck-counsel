@@ -95,9 +95,24 @@
       article.id = reviewerId(name);
       article.innerHTML = `
         <h2>${escapeText(name)}</h2>
-        <pre>Waiting...</pre>
+        <pre class="progress-log">Waiting...</pre>
       `;
       grid.appendChild(article);
+    }
+
+    function renderProgress(event) {
+      const card = document.querySelector(`#${CSS.escape(reviewerId(event.reviewer))}`);
+      if (!card) {
+        return;
+      }
+
+      const log = card.querySelector(".progress-log");
+      if (!log) {
+        return;
+      }
+
+      const marker = event.status === "completed" ? "[x]" : event.status === "failed" ? "[!]" : "[ ]";
+      log.textContent += `\n${marker} ${event.message}`;
     }
 
     function renderResult(result) {
@@ -162,10 +177,12 @@
 
           const event = JSON.parse(line);
           if (event.type === "start") {
-            statusEl.innerHTML = `Reviewers running... Archived to <code>${escapeText(event.archive_dir)}</code>`;
+            statusEl.innerHTML = `Reviewers running with ${event.worker_count} workers... Archived to <code>${escapeText(event.archive_dir)}</code>`;
             event.reviewers.forEach(renderPendingCard);
           } else if (event.type === "result") {
             renderResult(event.result);
+          } else if (event.type === "progress") {
+            renderProgress(event);
           } else if (event.type === "error") {
             statusEl.textContent = event.message;
           } else if (event.type === "done") {

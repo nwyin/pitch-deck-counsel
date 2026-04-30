@@ -30,6 +30,33 @@ http://127.0.0.1:5050
 
 Port `5000` may already be occupied on macOS, so `5050` is the documented default here.
 
+## OpenAI reliability knobs
+
+The app defaults to three reviewer calls in parallel. That keeps the interface concurrent while avoiding a burst of six long web-search reasoning requests at once.
+
+Optional `.env` settings:
+
+```bash
+REVIEW_MAX_WORKERS=3
+OPENAI_APP_MAX_RETRIES=2
+OPENAI_SDK_MAX_RETRIES=0
+OPENAI_READ_TIMEOUT_SECONDS=900
+OPENAI_CONNECT_TIMEOUT_SECONDS=20
+OPENAI_WRITE_TIMEOUT_SECONDS=60
+OPENAI_POOL_TIMEOUT_SECONDS=60
+REVIEW_MAX_OUTPUT_TOKENS=3500
+LOG_LEVEL=INFO
+LOG_PAYLOAD_PREVIEW_CHARS=0
+```
+
+If connection errors come back, lower `REVIEW_MAX_WORKERS` to `1` or `2`. If you want the original all-at-once behavior, set it to `6`.
+
+The app leaves SDK retries off by default. That makes each logged app attempt correspond to one OpenAI HTTP request instead of one app attempt hiding several SDK retries.
+
+Set `LOG_LEVEL=DEBUG` for noisier Flask/OpenAI request lifecycle logs. `LOG_PAYLOAD_PREVIEW_CHARS` can log the first N characters of the prompt payload, but it defaults to `0` so deck text is not printed to the terminal by accident.
+
+For the leanest debugging run, use reasoning `Off`, leave web search unchecked, set `REVIEW_MAX_WORKERS=1`, and set `REVIEW_MAX_OUTPUT_TOKENS=1200`.
+
 ## Test
 
 ```bash

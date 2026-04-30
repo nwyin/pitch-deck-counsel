@@ -1,13 +1,18 @@
 import json
+import logging
+import os
+import random
 import re
+import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from flask import Flask, Response, render_template, request, stream_with_context
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, DefaultHttpxClient, OpenAI, RateLimitError
 
 from prompts import REVIEWERS
 
@@ -15,7 +20,22 @@ from prompts import REVIEWERS
 load_dotenv()
 
 app = Flask(__name__)
-client = OpenAI(timeout=300)
+
+
+def int_from_env(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if not raw_value:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def log_level_from_env() -> int:
+    level_name = os.getenv("LOG_LEVEL", "INFO").upper()
+    return getattr(logging, level_name, logging.INFO)
 
 MODEL_OPTIONS = [
     {"value": "gpt-5.5", "label": "GPT-5.5"},
@@ -24,7 +44,9 @@ MODEL_OPTIONS = [
     {"value": "gpt-5.2", "label": "GPT-5.2"},
 ]
 EFFORT_OPTIONS = [
+    {"value": "none", "label": "Off"},
     {"value": "default", "label": "Default"},
+    {"value": "minimal", "label": "Minimal"},
     {"value": "low", "label": "Low"},
     {"value": "medium", "label": "Medium"},
     {"value": "high", "label": "High"},
@@ -37,15 +59,49 @@ SEARCH_CONTEXT_OPTIONS = [
 ]
 
 DEFAULT_MODEL = "gpt-5.5"
-DEFAULT_EFFORT = "default"
+DEFAULT_EFFORT = "none"
 DEFAULT_SEARCH_CONTEXT_SIZE = "medium"
-REVIEW_TIMEOUT_SECONDS = 300
+REVIEW_TIMEOUT_SECONDS = int_from_env("OPENAI_READ_TIMEOUT_SECONDS", 900)
+OPENAI_CONNECT_TIMEOUT_SECONDS = int_from_env("OPENAI_CONNECT_TIMEOUT_SECONDS", 20)
+OPENAI_WRITE_TIMEOUT_SECONDS = int_from_env("OPENAI_WRITE_TIMEOUT_SECONDS", 60)
+OPENAI_POOL_TIMEOUT_SECONDS = int_from_env("OPENAI_POOL_TIMEOUT_SECONDS", 60)
+OPENAI_APP_MAX_RETRIES = int_from_env("OPENAI_APP_MAX_RETRIES", int_from_env("OPENAI_MAX_RETRIES", 2))
+OPENAI_SDK_MAX_RETRIES = int_from_env("OPENAI_SDK_MAX_RETRIES", 0)
+REVIEW_MAX_WORKERS = int_from_env("REVIEW_MAX_WORKERS", 3)
+REVIEW_MAX_OUTPUT_TOKENS = int_from_env("REVIEW_MAX_OUTPUT_TOKENS", 3500)
+LOG_PAYLOAD_PREVIEW_CHARS = int_from_env("LOG_PAYLOAD_PREVIEW_CHARS", 0)
 ARCHIVE_ROOT = Path("archives")
 WEB_RESEARCH_INSTRUCTIONS = """
 When web search is enabled, independently research investor-relevant market,
 competitor, procurement, pricing, category, and timing context. Cite sources
 where available. Separate facts found externally from assumptions and inferences.
 """
+
+OPENAI_TIMEOUT = httpx.Timeout(
+    connect=OPENAI_CONNECT_TIMEOUT_SECONDS,
+    read=REVIEW_TIMEOUT_SECONDS,
+    write=OPENAI_WRITE_TIMEOUT_SECONDS,
+    pool=OPENAI_POOL_TIMEOUT_SECONDS,
+)
+OPENAI_HTTP_CLIENT = DefaultHttpxClient(
+    timeout=OPENAI_TIMEOUT,
+    limits=httpx.Limits(
+        max_connections=max(REVIEW_MAX_WORKERS * 2, 6),
+        max_keepalive_connections=max(REVIEW_MAX_WORKERS, 3),
+        keepalive_expiry=30,
+    ),
+)
+OPENAI_CLIENT = OpenAI(
+    timeout=OPENAI_TIMEOUT,
+    max_retries=OPENAI_SDK_MAX_RETRIES,
+    http_client=OPENAI_HTTP_CLIENT,
+)
+
+logging.basicConfig(
+    level=log_level_from_env(),
+    format="%(asctime)s %(levelname)s [%(threadName)s] %(name)s: %(message)s",
+)
+app.logger.setLevel(log_level_from_env())
 
 
 def option_values(options: list[dict[str, str]]) -> set[str]:
@@ -87,7 +143,7 @@ def template_context(**overrides):
         "settings": {
             "model": DEFAULT_MODEL,
             "reasoning_effort": DEFAULT_EFFORT,
-            "enable_web_search": True,
+            "enable_web_search": False,
             "search_context_size": DEFAULT_SEARCH_CONTEXT_SIZE,
         },
     }
@@ -111,9 +167,12 @@ def build_response_payload(
     payload = {
         "model": model,
         "input": f"{instructions}\n\nDeck outline:\n{deck_outline}",
+        "max_output_tokens": REVIEW_MAX_OUTPUT_TOKENS,
     }
 
-    if reasoning_effort != "default":
+    if reasoning_effort == "none":
+        pass
+    elif reasoning_effort != "default":
         payload["reasoning"] = {"effort": reasoning_effort, "summary": "detailed"}
     else:
         payload["reasoning"] = {"summary": "detailed"}
@@ -125,8 +184,115 @@ def build_response_payload(
                 "search_context_size": search_context_size,
             }
         ]
+        payload["include"] = ["web_search_call.action.sources"]
 
     return payload
+
+
+def reviewer_worker_count() -> int:
+    return min(len(REVIEWERS), REVIEW_MAX_WORKERS)
+
+
+def payload_log_summary(payload: dict) -> dict:
+    summary = {
+        "model": payload.get("model"),
+        "input_chars": len(payload.get("input") or ""),
+        "max_output_tokens": payload.get("max_output_tokens"),
+        "reasoning": payload.get("reasoning"),
+        "tools": [tool.get("type") for tool in payload.get("tools", [])],
+        "include": payload.get("include", []),
+    }
+    if LOG_PAYLOAD_PREVIEW_CHARS:
+        summary["input_preview"] = (payload.get("input") or "")[:LOG_PAYLOAD_PREVIEW_CHARS]
+    return summary
+
+
+def response_log_summary(response) -> dict:
+    usage = getattr(response, "usage", None)
+    if hasattr(usage, "model_dump"):
+        usage = usage.model_dump()
+    return {
+        "id": getattr(response, "id", None),
+        "status": getattr(response, "status", None),
+        "output_chars": len(getattr(response, "output_text", "") or ""),
+        "usage": usage,
+    }
+
+
+def exception_log_summary(exc: Exception) -> dict:
+    cause = exc.__cause__
+    return {
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+        "cause_type": type(cause).__name__ if cause else None,
+        "cause": str(cause) if cause else None,
+    }
+
+
+def create_response_with_retries(payload: dict, reviewer_name: str = "unknown", run_id: str = "unknown"):
+    request_started = time.monotonic()
+    for attempt in range(1, OPENAI_APP_MAX_RETRIES + 1):
+        attempt_started = time.monotonic()
+        app.logger.info(
+            "openai_attempt_start run=%s reviewer=%r attempt=%s/%s payload=%s",
+            run_id,
+            reviewer_name,
+            attempt,
+            OPENAI_APP_MAX_RETRIES,
+            payload_log_summary(payload),
+        )
+        try:
+            response = OPENAI_CLIENT.responses.create(**payload)
+            app.logger.info(
+                "openai_attempt_success run=%s reviewer=%r attempt=%s elapsed=%.2fs total_elapsed=%.2fs response=%s",
+                run_id,
+                reviewer_name,
+                attempt,
+                time.monotonic() - attempt_started,
+                time.monotonic() - request_started,
+                response_log_summary(response),
+            )
+            return response
+        except (APIConnectionError, APITimeoutError) as exc:
+            app.logger.warning(
+                "openai_attempt_connection_error run=%s reviewer=%r attempt=%s/%s elapsed=%.2fs error=%s",
+                run_id,
+                reviewer_name,
+                attempt,
+                OPENAI_APP_MAX_RETRIES,
+                time.monotonic() - attempt_started,
+                exception_log_summary(exc),
+            )
+            if attempt == OPENAI_APP_MAX_RETRIES:
+                raise
+            delay = min(2**attempt, 20) + random.uniform(0, 0.5)
+            app.logger.warning(
+                "openai_attempt_retry_sleep run=%s reviewer=%r delay=%.1fs next_attempt=%s/%s",
+                run_id,
+                reviewer_name,
+                delay,
+                attempt + 1,
+                OPENAI_APP_MAX_RETRIES,
+            )
+            time.sleep(delay)
+        except RateLimitError:
+            app.logger.exception(
+                "openai_rate_limit_no_retry run=%s reviewer=%r attempt=%s elapsed=%.2fs",
+                run_id,
+                reviewer_name,
+                attempt,
+                time.monotonic() - attempt_started,
+            )
+            raise
+        except APIStatusError:
+            app.logger.exception(
+                "openai_status_error_no_retry run=%s reviewer=%r attempt=%s elapsed=%.2fs",
+                run_id,
+                reviewer_name,
+                attempt,
+                time.monotonic() - attempt_started,
+            )
+            raise
 
 
 def as_plain_data(value):
@@ -215,6 +381,13 @@ def create_archive_run(settings: dict, deck_outline: str) -> Path:
     run_dir.mkdir(parents=True)
     save_run_metadata(run_dir, settings)
     save_submitted_draft(run_dir, deck_outline)
+    app.logger.info(
+        "archive_created run=%s path=%s deck_chars=%s settings=%s",
+        run_dir.name,
+        run_dir,
+        len(deck_outline),
+        settings,
+    )
     return run_dir
 
 
@@ -293,7 +466,10 @@ def run_review(
     reasoning_effort: str,
     enable_web_search: bool,
     search_context_size: str,
+    run_id: str = "manual",
 ) -> dict:
+    started = time.monotonic()
+    app.logger.info("review_start run=%s reviewer=%r", run_id, name)
     payload = build_response_payload(
         name=name,
         prompt=prompt,
@@ -303,15 +479,24 @@ def run_review(
         enable_web_search=enable_web_search,
         search_context_size=search_context_size,
     )
-    thread_client = OpenAI(timeout=REVIEW_TIMEOUT_SECONDS, max_retries=2)
-    response = thread_client.responses.create(**payload)
+    response = create_response_with_retries(payload, reviewer_name=name, run_id=run_id)
 
-    return {
+    result = {
         "name": name,
         "text": response.output_text,
         "reasoning_summary": extract_reasoning_summary(response),
         "sources": extract_sources(response),
     }
+    app.logger.info(
+        "review_success run=%s reviewer=%r elapsed=%.2fs output_chars=%s reasoning_chars=%s sources=%s",
+        run_id,
+        name,
+        time.monotonic() - started,
+        len(result["text"] or ""),
+        len(result["reasoning_summary"] or ""),
+        len(result["sources"]),
+    )
+    return result
 
 
 @app.get("/")
@@ -336,8 +521,15 @@ def review():
 
     results = []
     archive_dir = create_archive_run(settings, deck_outline)
+    run_id = archive_dir.name
+    app.logger.info(
+        "review_batch_start run=%s mode=sync reviewers=%s workers=%s",
+        run_id,
+        len(REVIEWERS),
+        reviewer_worker_count(),
+    )
 
-    with ThreadPoolExecutor(max_workers=len(REVIEWERS)) as executor:
+    with ThreadPoolExecutor(max_workers=reviewer_worker_count()) as executor:
         future_to_reviewer = {
             executor.submit(
                 run_review,
@@ -348,6 +540,7 @@ def review():
                 settings["reasoning_effort"],
                 settings["enable_web_search"],
                 settings["search_context_size"],
+                run_id,
             ): reviewer
             for reviewer in REVIEWERS
         }
@@ -357,6 +550,13 @@ def review():
             try:
                 result = future.result()
             except Exception as exc:
+                app.logger.warning(
+                    "review_failed run=%s reviewer=%r error=%s\n%s",
+                    run_id,
+                    reviewer["name"],
+                    exception_log_summary(exc),
+                    traceback.format_exc(),
+                )
                 result = {
                     "name": f"{reviewer['name']} failed",
                     "text": f"{type(exc).__name__}: {exc}",
@@ -365,8 +565,16 @@ def review():
                 }
             save_review_result(archive_dir, result)
             results.append(result)
+            app.logger.info(
+                "review_result_archived run=%s reviewer=%r completed=%s/%s",
+                run_id,
+                result["name"],
+                len(results),
+                len(REVIEWERS),
+            )
 
     results.sort(key=lambda item: item["name"])
+    app.logger.info("review_batch_done run=%s mode=sync results=%s", run_id, len(results))
 
     return render_template(
         "results.html",
@@ -395,6 +603,13 @@ def review_stream():
         )
 
     archive_dir = create_archive_run(settings, deck_outline)
+    run_id = archive_dir.name
+    app.logger.info(
+        "review_batch_start run=%s mode=stream reviewers=%s workers=%s",
+        run_id,
+        len(REVIEWERS),
+        reviewer_worker_count(),
+    )
 
     def generate():
         yield json_line(
@@ -403,10 +618,21 @@ def review_stream():
                 "settings": settings,
                 "reviewers": [reviewer["name"] for reviewer in REVIEWERS],
                 "archive_dir": str(archive_dir),
+                "worker_count": reviewer_worker_count(),
             }
         )
 
-        with ThreadPoolExecutor(max_workers=len(REVIEWERS)) as executor:
+        with ThreadPoolExecutor(max_workers=reviewer_worker_count()) as executor:
+            for reviewer in REVIEWERS:
+                yield json_line(
+                    {
+                        "type": "progress",
+                        "reviewer": reviewer["name"],
+                        "status": "queued",
+                        "message": "Queued",
+                    }
+                )
+
             future_to_reviewer = {
                 executor.submit(
                     run_review,
@@ -417,9 +643,19 @@ def review_stream():
                     settings["reasoning_effort"],
                     settings["enable_web_search"],
                     settings["search_context_size"],
+                    run_id,
                 ): reviewer
                 for reviewer in REVIEWERS
             }
+            for reviewer in REVIEWERS:
+                yield json_line(
+                    {
+                        "type": "progress",
+                        "reviewer": reviewer["name"],
+                        "status": "submitted",
+                        "message": "Submitted to worker pool",
+                    }
+                )
 
             for future in as_completed(future_to_reviewer):
                 reviewer = future_to_reviewer[future]
@@ -427,11 +663,27 @@ def review_stream():
                     result = future.result()
                     archive_path = save_review_result(archive_dir, result)
                     result["archive_path"] = str(archive_path)
+                    app.logger.info(
+                        "review_result_archived run=%s reviewer=%r path=%s",
+                        run_id,
+                        result["name"],
+                        archive_path,
+                    )
+                    yield json_line(
+                        {
+                            "type": "progress",
+                            "reviewer": reviewer["name"],
+                            "status": "completed",
+                            "message": "Completed and archived",
+                        }
+                    )
                     yield json_line({"type": "result", "result": result})
                 except Exception as exc:
                     app.logger.warning(
-                        "Reviewer failed: %s\n%s",
+                        "review_failed run=%s reviewer=%r error=%s\n%s",
+                        run_id,
                         reviewer["name"],
+                        exception_log_summary(exc),
                         traceback.format_exc(),
                     )
                     result = {
@@ -444,11 +696,20 @@ def review_stream():
                     result["archive_path"] = str(archive_path)
                     yield json_line(
                         {
+                            "type": "progress",
+                            "reviewer": reviewer["name"],
+                            "status": "failed",
+                            "message": "Failed and archived",
+                        }
+                    )
+                    yield json_line(
+                        {
                             "type": "result",
                             "result": result,
                         }
                     )
 
+        app.logger.info("review_batch_done run=%s mode=stream", run_id)
         yield json_line({"type": "done"})
 
     return Response(stream_with_context(generate()), mimetype="application/x-ndjson")

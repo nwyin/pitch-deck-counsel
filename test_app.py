@@ -7,24 +7,37 @@ import app as app_module
 
 
 class PayloadTests(unittest.TestCase):
-    def test_default_payload_omits_reasoning_and_adds_web_search(self):
+    def test_no_reasoning_payload_omits_reasoning_and_adds_web_search(self):
+        payload = app_module.build_response_payload(
+            name="Reviewer",
+            prompt="Prompt",
+            deck_outline="1. intro",
+            model="gpt-5.5",
+            reasoning_effort="none",
+            enable_web_search=True,
+            search_context_size="medium",
+        )
+
+        self.assertEqual(payload["model"], "gpt-5.5")
+        self.assertNotIn("reasoning", payload)
+        self.assertEqual(
+            payload["tools"],
+            [{"type": "web_search", "search_context_size": "medium"}],
+        )
+        self.assertIn("independently research", payload["input"])
+
+    def test_default_reasoning_requests_summary_without_effort(self):
         payload = app_module.build_response_payload(
             name="Reviewer",
             prompt="Prompt",
             deck_outline="1. intro",
             model="gpt-5.5",
             reasoning_effort="default",
-            enable_web_search=True,
+            enable_web_search=False,
             search_context_size="medium",
         )
 
-        self.assertEqual(payload["model"], "gpt-5.5")
         self.assertEqual(payload["reasoning"], {"summary": "detailed"})
-        self.assertEqual(
-            payload["tools"],
-            [{"type": "web_search", "search_context_size": "medium"}],
-        )
-        self.assertIn("independently research", payload["input"])
 
     def test_high_effort_without_web_search(self):
         payload = app_module.build_response_payload(

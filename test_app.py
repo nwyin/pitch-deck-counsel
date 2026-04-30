@@ -148,17 +148,95 @@ class ArchiveTests(unittest.TestCase):
             self.assertIn("Model response", content)
             self.assertIn("[Example](https://example.com)", content)
 
+    def test_load_archive_run_reads_draft_settings_and_results(self):
+        original_root = app_module.ARCHIVE_ROOT
+        with TemporaryDirectory() as tmpdir:
+            app_module.ARCHIVE_ROOT = Path(tmpdir)
+            try:
+                run_dir = app_module.create_archive_run(
+                    {
+                        "model": "gpt-5.4-mini",
+                        "reasoning_effort": "none",
+                        "enable_web_search": False,
+                        "search_context_size": "low",
+                    },
+                    "1. intro\n2. problem",
+                )
+                app_module.save_review_result(
+                    run_dir,
+                    {
+                        "name": "1. First-Principles VC Read",
+                        "text": "Model response",
+                        "reasoning_summary": "Reasoning summary",
+                        "sources": [{"title": "Example", "url": "https://example.com"}],
+                    },
+                )
+
+                archive = app_module.load_archive_run(run_dir.name)
+            finally:
+                app_module.ARCHIVE_ROOT = original_root
+
+        self.assertEqual(archive["deck_outline"], "1. intro\n2. problem")
+        self.assertEqual(archive["settings"]["model"], "gpt-5.4-mini")
+        self.assertFalse(archive["settings"]["enable_web_search"])
+        self.assertEqual(archive["results"][0]["name"], "1. First-Principles VC Read")
+        self.assertEqual(archive["results"][0]["text"], "Model response")
+        self.assertEqual(archive["results"][0]["reasoning_summary"], "Reasoning summary")
+        self.assertEqual(archive["results"][0]["sources"], [{"title": "Example", "url": "https://example.com"}])
+
 
 class RouteTests(unittest.TestCase):
     def test_home_renders_controls(self):
-        client = app_module.app.test_client()
-        response = client.get("/")
+        original_root = app_module.ARCHIVE_ROOT
+        with TemporaryDirectory() as tmpdir:
+            app_module.ARCHIVE_ROOT = Path(tmpdir)
+            try:
+                (Path(tmpdir) / "20260430-120000").mkdir()
+                client = app_module.app.test_client()
+                response = client.get("/")
+            finally:
+                app_module.ARCHIVE_ROOT = original_root
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'name="model"', response.data)
         self.assertIn(b'name="reasoning_effort"', response.data)
         self.assertIn(b'name="enable_web_search"', response.data)
         self.assertIn(b'id="results-grid"', response.data)
+        self.assertIn(b'id="archive-select"', response.data)
+        self.assertIn(b"20260430-120000", response.data)
+
+    def test_archive_route_returns_json(self):
+        original_root = app_module.ARCHIVE_ROOT
+        with TemporaryDirectory() as tmpdir:
+            app_module.ARCHIVE_ROOT = Path(tmpdir)
+            try:
+                run_dir = app_module.create_archive_run(
+                    {
+                        "model": "gpt-5.4-mini",
+                        "reasoning_effort": "none",
+                        "enable_web_search": False,
+                        "search_context_size": "low",
+                    },
+                    "1. intro",
+                )
+                app_module.save_review_result(
+                    run_dir,
+                    {
+                        "name": "Reviewer A",
+                        "text": "Done",
+                        "reasoning_summary": "",
+                        "sources": [],
+                    },
+                )
+                client = app_module.app.test_client()
+                response = client.get(f"/archive/{run_dir.name}")
+            finally:
+                app_module.ARCHIVE_ROOT = original_root
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(data["deck_outline"], "1. intro")
+        self.assertEqual(data["results"][0]["name"], "Reviewer A")
 
     def test_empty_outline_preserves_settings(self):
         client = app_module.app.test_client()

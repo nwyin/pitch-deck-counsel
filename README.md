@@ -76,3 +76,5 @@ Each run includes:
 ```
 
 Reviewer files include the reasoning summary, model response, and sources when available.
+
+The home page includes an archive dropdown sorted newest-first. Selecting a run loads the submitted draft back into the textarea and renders the saved reviewer artifacts below it.

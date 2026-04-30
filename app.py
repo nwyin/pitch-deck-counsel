@@ -11,7 +11,7 @@ from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
-from flask import Flask, Response, render_template, request, stream_with_context
+from flask import Flask, Response, abort, jsonify, render_template, request, stream_with_context
 from openai import APIConnectionError, APIStatusError, APITimeoutError, DefaultHttpxClient, OpenAI, RateLimitError
 
 from prompts import REVIEWERS
@@ -140,6 +140,7 @@ def template_context(**overrides):
         "model_options": MODEL_OPTIONS,
         "effort_options": EFFORT_OPTIONS,
         "search_context_options": SEARCH_CONTEXT_OPTIONS,
+        "archive_runs": list_archive_runs(),
         "settings": {
             "model": DEFAULT_MODEL,
             "reasoning_effort": DEFAULT_EFFORT,
@@ -368,6 +369,109 @@ def slugify(value: str) -> str:
     return slug or "review"
 
 
+def list_archive_runs() -> list[str]:
+    if not ARCHIVE_ROOT.exists():
+        return []
+    return sorted(
+        [
+            path.name
+            for path in ARCHIVE_ROOT.iterdir()
+            if path.is_dir() and re.fullmatch(r"\d{8}-\d{6}(?:-\d{2})?", path.name)
+        ],
+        reverse=True,
+    )
+
+
+def archive_run_path(run_id: str) -> Path:
+    if not re.fullmatch(r"\d{8}-\d{6}(?:-\d{2})?", run_id):
+        abort(404)
+    path = ARCHIVE_ROOT / run_id
+    if not path.is_dir():
+        abort(404)
+    return path
+
+
+def extract_fenced_text(markdown: str) -> str:
+    match = re.search(r"```(?:text)?\n(.*?)\n```", markdown, flags=re.DOTALL)
+    if match:
+        return match.group(1)
+    return markdown
+
+
+def markdown_section(markdown: str, heading: str, next_headings: list[str] | None = None) -> str:
+    next_headings = next_headings or []
+    start = markdown.find(heading)
+    if start == -1:
+        return ""
+    start += len(heading)
+    end_candidates = [markdown.find(next_heading, start) for next_heading in next_headings]
+    end_candidates = [candidate for candidate in end_candidates if candidate != -1]
+    end = min(end_candidates) if end_candidates else len(markdown)
+    return markdown[start:end].strip()
+
+
+def parse_sources(markdown: str) -> list[dict[str, str]]:
+    sources_markdown = markdown_section(markdown, "## Sources")
+    sources = []
+    for title, url in re.findall(r"^- \[(.*?)\]\((.*?)\)$", sources_markdown, flags=re.MULTILINE):
+        sources.append({"title": title, "url": url})
+    return sources
+
+
+def parse_review_markdown(path: Path) -> dict:
+    markdown = path.read_text(encoding="utf-8")
+    title_match = re.search(r"^# (.+)$", markdown, flags=re.MULTILINE)
+    name = title_match.group(1) if title_match else path.stem
+    return {
+        "name": name,
+        "reasoning_summary": markdown_section(markdown, "## Reasoning Summary", ["## Model Response", "## Sources"]),
+        "text": markdown_section(markdown, "## Model Response", ["## Sources"]),
+        "sources": parse_sources(markdown),
+        "archive_path": str(path),
+    }
+
+
+def parse_run_settings(path: Path) -> dict[str, str | bool]:
+    settings = template_context()["settings"].copy()
+    if not path.exists():
+        return settings
+
+    markdown = path.read_text(encoding="utf-8")
+    setting_patterns = {
+        "model": r"- Model: `([^`]+)`",
+        "reasoning_effort": r"- Reasoning effort: `([^`]+)`",
+        "search_context_size": r"- Search context: `([^`]+)`",
+    }
+    for key, pattern in setting_patterns.items():
+        match = re.search(pattern, markdown)
+        if match:
+            settings[key] = match.group(1)
+
+    web_search_match = re.search(r"- Web search: `(on|off)`", markdown)
+    if web_search_match:
+        settings["enable_web_search"] = web_search_match.group(1) == "on"
+
+    return settings
+
+
+def load_archive_run(run_id: str) -> dict:
+    run_dir = archive_run_path(run_id)
+    draft_path = run_dir / "01-submitted-draft.md"
+    deck_outline = extract_fenced_text(draft_path.read_text(encoding="utf-8")) if draft_path.exists() else ""
+    review_paths = sorted(
+        path
+        for path in run_dir.glob("*.md")
+        if path.name not in {"00-settings.md", "01-submitted-draft.md"}
+    )
+    return {
+        "run_id": run_id,
+        "archive_dir": str(run_dir),
+        "deck_outline": deck_outline,
+        "settings": parse_run_settings(run_dir / "00-settings.md"),
+        "results": [parse_review_markdown(path) for path in review_paths],
+    }
+
+
 def create_archive_run(settings: dict, deck_outline: str) -> Path:
     ARCHIVE_ROOT.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -502,6 +606,11 @@ def run_review(
 @app.get("/")
 def index():
     return render_template("index.html", **template_context())
+
+
+@app.get("/archive/<run_id>")
+def archive(run_id: str):
+    return jsonify(load_archive_run(run_id))
 
 
 @app.post("/review")

@@ -84,6 +84,23 @@ summary {
   margin-bottom: 14px;
 }
 
+.archive-loader {
+  display: flex;
+  align-items: end;
+  gap: 14px;
+  margin: 0 0 20px;
+  padding: 12px;
+  border: 1px solid #d7d7d2;
+  border-radius: 4px;
+  background: #ffffff;
+}
+
+.archive-loader p {
+  margin: 0 0 8px;
+  color: #66717c;
+  font-size: 13px;
+}
+
 .checkbox {
   min-height: 36px;
   flex-direction: row;

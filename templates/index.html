@@ -7,6 +7,21 @@
     <p class="error">{{ error }}</p>
   {% endif %}
 
+  {% if archive_runs %}
+    <section class="archive-loader">
+      <label>
+        Archived runs
+        <select id="archive-select">
+          <option value="">Select an archived run...</option>
+          {% for run in archive_runs %}
+            <option value="{{ run }}">{{ run }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <p id="archive-status"></p>
+    </section>
+  {% endif %}
+
   <form method="post" action="/review" id="review-form">
     <div class="controls">
       <label>
@@ -71,6 +86,9 @@
 
   <script>
     const form = document.querySelector("#review-form");
+    const archiveSelect = document.querySelector("#archive-select");
+    const archiveStatus = document.querySelector("#archive-status");
+    const deckOutline = document.querySelector("textarea[name='deck_outline']");
     const streamArea = document.querySelector("#stream-area");
     const statusEl = document.querySelector("#stream-status");
     const grid = document.querySelector("#results-grid");
@@ -139,6 +157,62 @@
       `;
     }
 
+    function setSelectValue(name, value) {
+      const control = form.querySelector(`[name="${name}"]`);
+      if (control && value) {
+        control.value = value;
+      }
+    }
+
+    function applyArchiveSettings(settings) {
+      if (!settings) {
+        return;
+      }
+
+      setSelectValue("model", settings.model);
+      setSelectValue("reasoning_effort", settings.reasoning_effort);
+      setSelectValue("search_context_size", settings.search_context_size);
+
+      const webSearch = form.querySelector('[name="enable_web_search"]');
+      if (webSearch) {
+        webSearch.checked = Boolean(settings.enable_web_search);
+      }
+    }
+
+    async function loadArchive(runId) {
+      if (!runId) {
+        return;
+      }
+
+      if (archiveStatus) {
+        archiveStatus.textContent = "Loading...";
+      }
+      streamArea.hidden = false;
+      grid.innerHTML = "";
+      statusEl.textContent = "Loading archive...";
+
+      const response = await fetch(`/archive/${encodeURIComponent(runId)}`);
+      if (!response.ok) {
+        const message = `Archive load failed: ${response.status}`;
+        statusEl.textContent = message;
+        if (archiveStatus) {
+          archiveStatus.textContent = message;
+        }
+        return;
+      }
+
+      const archive = await response.json();
+      deckOutline.value = archive.deck_outline || "";
+      applyArchiveSettings(archive.settings);
+
+      statusEl.innerHTML = `Loaded archive <code>${escapeText(archive.archive_dir)}</code>`;
+      if (archiveStatus) {
+        archiveStatus.textContent = `${archive.results.length} artifacts loaded.`;
+      }
+
+      archive.results.forEach(renderResult);
+    }
+
     async function streamReview(event) {
       event.preventDefault();
 
@@ -193,5 +267,8 @@
     }
 
     form.addEventListener("submit", streamReview);
+    if (archiveSelect) {
+      archiveSelect.addEventListener("change", (event) => loadArchive(event.target.value));
+    }
   </script>
 {% endblock %}

@@ -2,6 +2,11 @@
 
 Tiny Flask app for running a pitch deck outline through several OpenAI-powered reviewer prompts.
 
+The app supports two investor modes:
+
+- `Venture`: VC-style fund-return, IC memo, TAM, and partner-meeting critique.
+- `Angel`: individual angel, operator angel, and angel syndicate critique focused on conviction, check-writing risk, round construction, and follow-on path.
+
 ## Setup
 
 ```bash

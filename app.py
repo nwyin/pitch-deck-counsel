@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from flask import Flask, Response, abort, jsonify, render_template, request, stream_with_context
 from openai import APIConnectionError, APIStatusError, APITimeoutError, DefaultHttpxClient, OpenAI, RateLimitError
 
-from prompts import REVIEWERS
+from prompts import VENTURE_REVIEWERS, reviewers_for_mode
 
 
 load_dotenv()
@@ -58,8 +58,13 @@ SEARCH_CONTEXT_OPTIONS = [
     {"value": "medium", "label": "Medium"},
     {"value": "high", "label": "High"},
 ]
+INVESTOR_MODE_OPTIONS = [
+    {"value": "venture", "label": "Venture"},
+    {"value": "angel", "label": "Angel"},
+]
 
 DEFAULT_MODEL = "gpt-5.5"
+DEFAULT_INVESTOR_MODE = "venture"
 DEFAULT_EFFORT = "low"
 DEFAULT_SEARCH_CONTEXT_SIZE = "low"
 REVIEW_TIMEOUT_SECONDS = int_from_env("OPENAI_READ_TIMEOUT_SECONDS", 900)
@@ -130,6 +135,11 @@ def sanitize_choice(value: str | None, allowed: set[str], default: str) -> str:
 
 def form_settings(form) -> dict[str, str | bool]:
     return {
+        "investor_mode": sanitize_choice(
+            form.get("investor_mode"),
+            option_values(INVESTOR_MODE_OPTIONS),
+            DEFAULT_INVESTOR_MODE,
+        ),
         "model": sanitize_choice(
             form.get("model"),
             option_values(MODEL_OPTIONS),
@@ -151,6 +161,7 @@ def form_settings(form) -> dict[str, str | bool]:
 
 def default_settings() -> dict[str, str | bool]:
     return {
+        "investor_mode": DEFAULT_INVESTOR_MODE,
         "model": DEFAULT_MODEL,
         "reasoning_effort": DEFAULT_EFFORT,
         "enable_web_search": True,
@@ -161,6 +172,7 @@ def default_settings() -> dict[str, str | bool]:
 def template_context(**overrides):
     context = {
         "model_options": MODEL_OPTIONS,
+        "investor_mode_options": INVESTOR_MODE_OPTIONS,
         "effort_options": EFFORT_OPTIONS,
         "search_context_options": SEARCH_CONTEXT_OPTIONS,
         "archive_runs": list_archive_runs(),
@@ -212,8 +224,9 @@ def build_response_payload(
     return payload
 
 
-def reviewer_worker_count() -> int:
-    return min(len(REVIEWERS), REVIEW_MAX_WORKERS)
+def reviewer_worker_count(reviewers=None) -> int:
+    reviewers = reviewers or VENTURE_REVIEWERS
+    return min(len(reviewers), REVIEW_MAX_WORKERS)
 
 
 def payload_log_summary(payload: dict) -> dict:
@@ -595,6 +608,7 @@ def parse_run_settings(path: Path) -> dict[str, str | bool]:
 
     markdown = path.read_text(encoding="utf-8")
     setting_patterns = {
+        "investor_mode": r"- Investor mode: `([^`]+)`",
         "model": r"- Model: `([^`]+)`",
         "reasoning_effort": r"- Reasoning effort: `([^`]+)`",
         "search_context_size": r"- Search context: `([^`]+)`",
@@ -656,6 +670,7 @@ def save_run_metadata(run_dir: Path, settings: dict) -> None:
     lines = [
         "# Review Run Settings",
         "",
+        f"- Investor mode: `{settings['investor_mode']}`",
         f"- Model: `{settings['model']}`",
         f"- Reasoning effort: `{settings['reasoning_effort']}`",
         f"- Web search: `{'on' if settings['enable_web_search'] else 'off'}`",
@@ -815,16 +830,18 @@ def review():
         )
 
     results = []
+    reviewers = reviewers_for_mode(settings["investor_mode"])
     archive_dir = create_archive_run(settings, deck_outline)
     run_id = archive_dir.name
     app.logger.info(
-        "review_batch_start run=%s mode=sync reviewers=%s workers=%s",
+        "review_batch_start run=%s mode=sync investor_mode=%s reviewers=%s workers=%s",
         run_id,
-        len(REVIEWERS),
-        reviewer_worker_count(),
+        settings["investor_mode"],
+        len(reviewers),
+        reviewer_worker_count(reviewers),
     )
 
-    with ThreadPoolExecutor(max_workers=reviewer_worker_count()) as executor:
+    with ThreadPoolExecutor(max_workers=reviewer_worker_count(reviewers)) as executor:
         future_to_reviewer = {
             executor.submit(
                 run_review,
@@ -837,7 +854,7 @@ def review():
                 settings["search_context_size"],
                 run_id,
             ): reviewer
-            for reviewer in REVIEWERS
+            for reviewer in reviewers
         }
 
         for future in as_completed(future_to_reviewer):
@@ -860,7 +877,7 @@ def review():
                 run_id,
                 result["name"],
                 len(results),
-                len(REVIEWERS),
+                len(reviewers),
             )
 
     results.sort(key=lambda item: item["name"])
@@ -893,12 +910,14 @@ def review_stream():
         )
 
     archive_dir = create_archive_run(settings, deck_outline)
+    reviewers = reviewers_for_mode(settings["investor_mode"])
     run_id = archive_dir.name
     app.logger.info(
-        "review_batch_start run=%s mode=stream reviewers=%s workers=%s",
+        "review_batch_start run=%s mode=stream investor_mode=%s reviewers=%s workers=%s",
         run_id,
-        len(REVIEWERS),
-        reviewer_worker_count(),
+        settings["investor_mode"],
+        len(reviewers),
+        reviewer_worker_count(reviewers),
     )
 
     def generate():
@@ -906,9 +925,9 @@ def review_stream():
             {
                 "type": "start",
                 "settings": settings,
-                "reviewers": [reviewer["name"] for reviewer in REVIEWERS],
+                "reviewers": [reviewer["name"] for reviewer in reviewers],
                 "archive_dir": str(archive_dir),
-                "worker_count": reviewer_worker_count(),
+                "worker_count": reviewer_worker_count(reviewers),
             }
         )
 
@@ -925,8 +944,8 @@ def review_stream():
                     break
                 yield json_line(event)
 
-        with ThreadPoolExecutor(max_workers=reviewer_worker_count()) as executor:
-            for reviewer in REVIEWERS:
+        with ThreadPoolExecutor(max_workers=reviewer_worker_count(reviewers)) as executor:
+            for reviewer in reviewers:
                 yield json_line(
                     {
                         "type": "progress",
@@ -949,9 +968,9 @@ def review_stream():
                     run_id,
                     progress_callback,
                 ): reviewer
-                for reviewer in REVIEWERS
+                for reviewer in reviewers
             }
-            for reviewer in REVIEWERS:
+            for reviewer in reviewers:
                 yield json_line(
                     {
                         "type": "progress",

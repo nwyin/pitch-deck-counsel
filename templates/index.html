@@ -25,6 +25,17 @@
   <form method="post" action="/review" id="review-form">
     <div class="controls">
       <label>
+        Investor mode
+        <select name="investor_mode">
+          {% for option in investor_mode_options %}
+            <option value="{{ option.value }}" {% if settings.investor_mode == option.value %}selected{% endif %}>
+              {{ option.label }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label>
         Model
         <select name="model">
           {% for option in model_options %}
@@ -174,6 +185,7 @@
       }
 
       setSelectValue("model", settings.model);
+      setSelectValue("investor_mode", settings.investor_mode);
       setSelectValue("reasoning_effort", settings.reasoning_effort);
       setSelectValue("search_context_size", settings.search_context_size);
 

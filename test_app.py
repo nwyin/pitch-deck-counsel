@@ -4,6 +4,7 @@ import unittest
 from types import SimpleNamespace
 
 import app as app_module
+from prompts import ANGEL_REVIEWERS, VENTURE_REVIEWERS, reviewers_for_mode
 
 
 class PayloadTests(unittest.TestCase):
@@ -70,6 +71,28 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(payload["reasoning"], {"effort": "high", "summary": "detailed"})
         self.assertNotIn("tools", payload)
         self.assertNotIn("independently research", payload["input"])
+
+
+class InvestorModeTests(unittest.TestCase):
+    def test_reviewers_for_mode_routes_to_selected_council(self):
+        self.assertIs(reviewers_for_mode("venture"), VENTURE_REVIEWERS)
+        self.assertIs(reviewers_for_mode("angel"), ANGEL_REVIEWERS)
+        self.assertIs(reviewers_for_mode("unknown"), VENTURE_REVIEWERS)
+
+    def test_form_settings_sanitizes_investor_mode(self):
+        settings = app_module.form_settings(
+            {
+                "investor_mode": "angel",
+                "model": "gpt-5.4-mini",
+                "reasoning_effort": "low",
+                "search_context_size": "low",
+            }
+        )
+
+        self.assertEqual(settings["investor_mode"], "angel")
+
+        settings = app_module.form_settings({"investor_mode": "bad"})
+        self.assertEqual(settings["investor_mode"], "venture")
 
 
 class BackgroundResponseTests(unittest.TestCase):
@@ -216,6 +239,7 @@ class ArchiveTests(unittest.TestCase):
             app_module.ARCHIVE_ROOT = Path(tmpdir)
             run_dir = app_module.create_archive_run(
                 {
+                    "investor_mode": "venture",
                     "model": "gpt-5.4-mini",
                     "reasoning_effort": "low",
                     "enable_web_search": True,
@@ -254,6 +278,7 @@ class ArchiveTests(unittest.TestCase):
             try:
                 run_dir = app_module.create_archive_run(
                     {
+                        "investor_mode": "angel",
                         "model": "gpt-5.4-mini",
                         "reasoning_effort": "none",
                         "enable_web_search": False,
@@ -276,6 +301,7 @@ class ArchiveTests(unittest.TestCase):
                 app_module.ARCHIVE_ROOT = original_root
 
         self.assertEqual(archive["deck_outline"], "1. intro\n2. problem")
+        self.assertEqual(archive["settings"]["investor_mode"], "angel")
         self.assertEqual(archive["settings"]["model"], "gpt-5.4-mini")
         self.assertFalse(archive["settings"]["enable_web_search"])
         self.assertEqual(archive["results"][0]["name"], "1. First-Principles VC Read")
@@ -298,6 +324,7 @@ class RouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b'name="model"', response.data)
+        self.assertIn(b'name="investor_mode"', response.data)
         self.assertIn(b'name="reasoning_effort"', response.data)
         self.assertIn(b'name="enable_web_search"', response.data)
         self.assertIn(b'id="results-grid"', response.data)
@@ -311,6 +338,7 @@ class RouteTests(unittest.TestCase):
             try:
                 run_dir = app_module.create_archive_run(
                     {
+                        "investor_mode": "venture",
                         "model": "gpt-5.4-mini",
                         "reasoning_effort": "none",
                         "enable_web_search": False,
@@ -343,6 +371,7 @@ class RouteTests(unittest.TestCase):
             "/review",
             data={
                 "deck_outline": "",
+                "investor_mode": "angel",
                 "model": "gpt-5.4",
                 "reasoning_effort": "high",
                 "search_context_size": "high",
@@ -351,14 +380,15 @@ class RouteTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"Paste a deck outline first.", response.data)
+        self.assertIn(b'value="angel" selected', response.data)
         self.assertIn(b'value="gpt-5.4" selected', response.data)
         self.assertIn(b'value="high" selected', response.data)
 
     def test_review_stream_returns_ndjson(self):
-        original_reviewers = app_module.REVIEWERS
+        original_reviewers_for_mode = app_module.reviewers_for_mode
         original_run_review = app_module.run_review
         original_root = app_module.ARCHIVE_ROOT
-        app_module.REVIEWERS = [{"name": "Reviewer A", "prompt": "Prompt"}]
+        app_module.reviewers_for_mode = lambda mode: [{"name": "Reviewer A", "prompt": "Prompt"}]
         app_module.run_review = lambda *args: {
             "name": "Reviewer A",
             "text": "Done",
@@ -374,6 +404,7 @@ class RouteTests(unittest.TestCase):
                     "/review-stream",
                     data={
                         "deck_outline": "1. intro",
+                        "investor_mode": "angel",
                         "model": "gpt-5.4-mini",
                         "reasoning_effort": "low",
                         "enable_web_search": "on",
@@ -382,7 +413,7 @@ class RouteTests(unittest.TestCase):
                     buffered=True,
                 )
             finally:
-                app_module.REVIEWERS = original_reviewers
+                app_module.reviewers_for_mode = original_reviewers_for_mode
                 app_module.run_review = original_run_review
                 app_module.ARCHIVE_ROOT = original_root
 
@@ -391,8 +422,8 @@ class RouteTests(unittest.TestCase):
             self.assertTrue((archive_runs[0] / "01-submitted-draft.md").exists())
             self.assertTrue((archive_runs[0] / "reviewer-a.md").exists())
 
-        if app_module.REVIEWERS is not original_reviewers:
-            app_module.REVIEWERS = original_reviewers
+        if app_module.reviewers_for_mode is not original_reviewers_for_mode:
+            app_module.reviewers_for_mode = original_reviewers_for_mode
         if app_module.run_review is not original_run_review:
             app_module.run_review = original_run_review
         app_module.ARCHIVE_ROOT = original_root
@@ -403,6 +434,44 @@ class RouteTests(unittest.TestCase):
         self.assertIn('"type": "result"', body)
         self.assertIn('"type": "done"', body)
         self.assertIn('"reasoning_summary": "Summary"', body)
+
+    def test_review_stream_uses_selected_investor_mode(self):
+        original_run_review = app_module.run_review
+        original_root = app_module.ARCHIVE_ROOT
+        calls = []
+
+        def fake_run_review(name, *args):
+            calls.append(name)
+            return {
+                "name": name,
+                "text": "Done",
+                "reasoning_summary": "",
+                "sources": [],
+            }
+
+        app_module.run_review = fake_run_review
+        with TemporaryDirectory() as tmpdir:
+            app_module.ARCHIVE_ROOT = Path(tmpdir)
+            try:
+                client = app_module.app.test_client()
+                response = client.post(
+                    "/review-stream",
+                    data={
+                        "deck_outline": "1. intro",
+                        "investor_mode": "angel",
+                        "model": "gpt-5.4-mini",
+                        "reasoning_effort": "low",
+                        "enable_web_search": "on",
+                        "search_context_size": "low",
+                    },
+                    buffered=True,
+                )
+            finally:
+                app_module.run_review = original_run_review
+                app_module.ARCHIVE_ROOT = original_root
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(calls, [reviewer["name"] for reviewer in ANGEL_REVIEWERS])
 
 
 if __name__ == "__main__":
